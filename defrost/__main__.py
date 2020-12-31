@@ -1,4 +1,5 @@
 #!/usr/bin/env python2
+# coding: utf-8
 from __future__ import print_function, unicode_literals
 
 import re
@@ -10,6 +11,7 @@ import base64
 import codecs
 import struct
 import logging
+import argparse
 import platform
 import threading
 import traceback
@@ -24,13 +26,41 @@ except:
 
 """
 defrost.py: split broken icecast recordings into separate mp3s
-2020-12-30, v0.7, ed <irc.rizon.net>, MIT-Licensed
+2020-12-31, v0.8, ed <irc.rizon.net>, MIT-Licensed
 https://ocv.me/dev/?defrost.py
+
+status:
+  kinda works
+
+howto:
+  this requiers an icecast recording which includes the
+  icecast metadata; to create such a recording do this:
+  
+    wget -U 'MPlayer' --header "Icy-MetaData: 1" -S "https://stream.r-a-d.io/main.mp3"
+
+NOTE:
+  the MP3s will be timestamped based on the source file, so
+  if the original mp3 lastmodified was when recording ended
+  then MP3s get lastmodified-times matching when they aired
+
+NOTE:
+  separate MP3s will be created for each track,
+  if you prefer a single MP3 and a cuesheet then
+  you can just concatenate the MP3s back together
+  and create a cuesheet based on the standalone ones
 """
 
-# mkdir tags; for f in main.mp3*; do python3 -u ~/dev/icychk.py "$f" 2>&1 | tee "tags/$f.tags"; echo "${PIPESTATUS[*]}" >> "tags/$f.tags"; done
-# for x in tags/*; do printf '\n%s\n' "$x"; tail -n 2 "$x"; done
-# for x in *; do printf '\n\n%s' "$x"; awk '{print $1}' "tags/$x.tags" | while IFS= read -r ofs; do printf '\n%s ' $ofs; dd if="$x" bs=1 count=13 skip=$ofs 2>/dev/null; done; done | tee /dev/shm/log
+try:
+    import mutagen
+    import chardet
+except ImportError as ex:
+    print(
+        "{0}\n\n  need {1}; please do this:\n    python -m pip install --user -U {1}".format(
+            repr(ex), str(ex).split(" ")[-1].strip("'")
+        )
+    )
+    sys.exit(1)
+
 
 YOLO = False  # cfg: True disengages safety checks
 METAINT = 16000  # cfg: should match the headers from the icecast server
@@ -52,26 +82,46 @@ else:
         stream.flush()
 
 
-debug = logging.debug
-info = logging.info
-warn = logging.warning
-error = logging.error
+logger = logging.getLogger(__name__)
+debug = logger.debug
+info = logger.info
+warn = logger.warning
+error = logger.error
 
 
 class LoggerFmt(logging.Formatter):
     def format(self, record):
         if record.levelno == logging.DEBUG:
-            ansi = "\033[01;30m"
+            c = "1;30"
         elif record.levelno == logging.INFO:
-            ansi = "\033[0;32m"
+            c = ";32"
         elif record.levelno == logging.WARN:
-            ansi = "\033[0;33m"
+            c = ";33"
         else:
-            ansi = "\033[01;31m"
+            c = "1;31"
 
         ts = datetime.utcfromtimestamp(record.created)
         ts = ts.strftime("%H:%M:%S.%f")[:-3]
-        return "\033[0;36m{}{} {}\033[0m".format(ts, ansi, record.msg)
+
+        msg = record.msg
+        if record.args:
+            msg = msg % record.args
+
+        return "\033[0;36m{}\033[0{}m {}\033[0m".format(ts, c, msg)
+
+
+def configure_logger(debug):
+    lv = logging.DEBUG if debug else logging.INFO
+    logging.basicConfig(
+        level=lv,
+        format="\033[36m%(asctime)s.%(msecs)03d\033[0m %(message)s",
+        datefmt="%H%M%S",
+    )
+    lh = logging.StreamHandler(sys.stderr)
+    lh.setFormatter(LoggerFmt())
+    logging.root.handlers = []  # kill other loggers
+    logger.handlers = [lh]  # make ours fancy
+    logger.setLevel(lv)
 
 
 def reprint(*args, **kwargs):
@@ -206,10 +256,16 @@ def tag2text(buf):
     buf = buf.rstrip(b"\x00")
     err = ""
     try:
-        meta = buf.decode("utf-8")
+        enc = "utf-8"
+        meta = buf.decode(enc)
     except:
-        meta = buf.decode("utf-8", "ignore")
-        err += " MOJIBAKE"
+        try:
+            enc = chardet.detect(buf)["encoding"]
+            meta = buf.decode(enc)
+        except:
+            enc = "utf-8"
+            meta = buf.decode(enc, "ignore")
+            err += " MOJIBAKE"
 
     safe_meta = "".join(c for c in meta if unicodedata.category(c)[0] != "C")
 
@@ -218,15 +274,15 @@ def tag2text(buf):
         err += " CONTROL"
         # uprint(u'[{}]\n[{}]'.format(meta,meta2))
 
-    return [meta, err]
+    return [meta, enc, err]
 
 
 def fmt_meta(metasrc_yield, sz, ntags):
     pos, buf = metasrc_yield
-    meta, err = tag2text(buf)
+    meta, enc, err = tag2text(buf)
 
-    return "at {}/{} ({:.2f}%), {} tags, [{}] {}".format(
-        pos, sz, (pos * 100.0 / sz), ntags, meta, err
+    return "at {}/{} ({:.2f}%), {} tags, [{}] [{}] {}".format(
+        pos, sz, (pos * 100.0 / sz), ntags, enc, meta, err
     )
 
 
@@ -516,104 +572,6 @@ def collect_frames(fn_mp3):
             yield [int(pos), float(ts)]
 
 
-def detect_silence_multi(fn_mp3):
-    """
-    yields [nFrame, dB, startTime, endTime, endTime2]
-    """
-
-    # ffmpeg -i 5g-ok.mp3.defrost.mp3 -af silencedetect=n=-30dB:d=1,silencedetect=n=-40dB:d=1,silencedetect=n=-50dB:d=1,silencedetect=n=-60dB:d=1 -f null -
-    # cmd /c "set FFREPORT=level=32:file=ffsilence.log & ffmpeg -v fatal -i 5g-ok.mp3.defrost.mp3 -af silencedetect=n=-30dB:d=1,ametadata=print:file=silence.txt -f null -"
-    # awk '{sub(/.*\r/,"");m=0} /monotonic/{m=1} m&&pm{next} {pm=m;m=0} 1' < ffsilence.log
-    # ffmpeg -i 5g-ok.mp3.defrost.mp3 -af silencedetect=n=-30dB:d=1,silencedetect=n=-40dB:d=1,silencedetect=n=-50dB:d=1,silencedetect=n=-60dB:d=1,ametadata=mode=print -f null -
-    # ffmpeg -i 5g-ok.mp3.defrost.mp3 -af ametadata=mode=delete,silencedetect=n=-30dB:d=0.5,ametadata=mode=print,ametadata=mode=delete,silencedetect=n=-40dB:d=0.5,ametadata=mode=print,ametadata=mode=delete,silencedetect=n=-50dB:d=0.5,ametadata=mode=print,ametadata=mode=delete,silencedetect=n=-60dB:d=0.5,ametadata=mode=print -f null -
-
-    ptn1 = re.compile(
-        r"^\[Parsed_ametadata_([0-9]+) @ [^] ]+\] frame:([0-9]+) pts:[0-9]+ pts_time:([0-9\.]+)$"
-    )
-    ptn2 = re.compile(
-        r"^\[Parsed_ametadata_([0-9]+) @ [^] ]+\] lavfi\.silence_(start|end)=([0-9\.]+)$"
-    )
-    # nth filternode: numDecibel
-    db = {1: 30, 2: 40, 3: 50, 4: 60}
-
-    # fmt: off
-    d = "ametadata=mode=delete,"
-    c = [
-        "ffmpeg",
-        "-threads", "0",
-        "-i", fn_mp3,
-        #"-af", "ametadata=mode=delete,silencedetect=n=-30dB:d=0.5,ametadata=mode=print,ametadata=mode=delete,silencedetect=n=-40dB:d=0.5,ametadata=mode=print,ametadata=mode=delete,silencedetect=n=-50dB:d=0.5,ametadata=mode=print,ametadata=mode=delete,silencedetect=n=-60dB:d=0.5,ametadata=mode=print",
-        "-af", "silencedetect=n=-30dB:d=0.5,ametadata=mode=print", "-f", "null", "-",
-        "-i", fn_mp3,
-        "-af", d + "silencedetect=n=-40dB:d=0.5,ametadata=mode=print", "-f", "null", "-",
-        "-i", fn_mp3,
-        "-af", d + d + "silencedetect=n=-50dB:d=0.5,ametadata=mode=print", "-f", "null", "-",
-        "-i", fn_mp3,
-        "-af", d + d + d + "silencedetect=n=-60dB:d=0.5,ametadata=mode=print", "-f", "null", "-",
-    ]
-    # fmt: on
-
-    # 609.77  4 detectors
-    # 322.12  1 detector
-    # 713.09  4 detectors multiple outputs
-    # 710.60  4 detectors multiple outputs threads=0
-
-    p = sp.Popen(c, stderr=sp.PIPE)
-    fails = 0
-    buf = b""
-    cframe = {}
-    cstate = {}
-    while True:
-        ibuf = p.stderr.read(4096)
-        if not ibuf:
-            if p.poll() is not None:
-                info("FFmpeg terminated")
-                return
-            else:
-                fails += 1
-                if fails < 30:
-                    time.sleep(0.1)
-                    continue
-
-                raise Exception("read err 1")
-
-        fails = 0
-        buf += ibuf.replace(b"\r", b"\n")
-        try:
-            tbuf, buf = buf.rsplit(b"\n", 1)
-        except:
-            continue
-
-        sbuf = tbuf.decode("utf-8")
-        for ln in sbuf.split("\n"):
-            if not ln.startswith("[Parsed_ametadata_"):
-                continue
-
-            m = ptn1.match(ln)
-            if m:
-                node, nframe, ts = m.groups()
-                cframe[int(node)] = [int(nframe), float(ts)]
-                continue
-
-            m = ptn2.match(ln)
-            if not m:
-                continue
-
-            node, act, ts = m.groups()
-            node = int(node)
-            ts = float(ts)
-            if act == "start":
-                cstate[node] = [cframe[node], ts]
-            else:
-                try:
-                    ref, start_ts = cstate[node]
-                except:
-                    continue  # first blip of silence probably
-
-                nframe, frame_ts = cframe[node]
-                yield [nframe, db[node], start_ts, ts, frame_ts]
-
-
 def detect_silence_one(fn_mp3, db, len_sec, xpos, ret):
     """
     yields [nFrame, dB, startTime, endTime]
@@ -631,9 +589,11 @@ def detect_silence_one(fn_mp3, db, len_sec, xpos, ret):
     # fmt: off
     c = [
         "ffmpeg",
+        "-nostdin",
+        "-hide_banner",
         "-v", "fatal",
         "-i", fn_mp3,
-        "-af", "ametadata=mode=add:key=a:value=a,silencedetect=n=-{}dB:d=0.2,ametadata=mode=print:file=-".format(db),
+        "-af", "ametadata=mode=add:key=a:value=a,silencedetect=n=-{}dB:d=0.7,ametadata=mode=print:file=-".format(db),
         "-f", "null", "-",
     ]
     # fmt: on
@@ -768,6 +728,10 @@ def find_silence(silents, target_sec):
     best_dist = None
     best_db = None
     for db in [60, 50, 40, 30]:
+        if db <= 30 and best_dist:
+            # skip 30dB if we have anything at all
+            break
+
         for nframe, t1, t2 in silents[db]:
             if t2 < target_sec - 30:
                 continue
@@ -789,27 +753,107 @@ def find_silence(silents, target_sec):
         return [target_sec, None]
 
 
+def sanitize_fn(fn):
+    for bad, good in [
+        ["<", "＜"],
+        [">", "＞"],
+        [":", "："],
+        ['"', "＂"],
+        ["/", "／"],
+        ["\\", "＼"],
+        ["|", "｜"],
+        ["?", "？"],
+        ["*", "＊"],
+        ["'", "＇"],  # shell-safety
+        ["`", "｀"],  # shell-safety
+    ]:
+        fn = fn.replace(bad, good)
+
+    if WINDOWS:
+        bad = ["con", "prn", "aux", "nul"]
+        for n in range(1, 10):
+            bad += "com{0} lpt{0}".format(n).split(" ")
+
+        if fn.lower() in bad:
+            fn = "_" + fn
+
+    return fn
+
+
+def split_mp3(f_defrosted, ntrack, ofs1, ofs2, outdir, tagtxt):
+    title = sanitize_fn(tagtxt) or "untitled"
+    while True:
+        try:
+            fn = "{}/{}. {}.mp3".format(outdir, ntrack, title)
+            f = open(fn, "wb")
+            break
+        except:
+            if not title:
+                raise
+            title = title[:-1]
+
+    f_defrosted.seek(ofs1)
+    rem = ofs2 - ofs1
+    while rem > 0:
+        buf = f_defrosted.read(4096)
+        rem -= len(buf)
+        if rem and not buf:
+            raise Exception("hit eof in defrosted mp3")
+
+        f.write(buf)
+
+    f.close()
+
+    artist = None
+    ofs = tagtxt.find(" - ")
+    if ofs < 0:
+        title = tagtxt
+    if ofs == 0:
+        title = tagtxt[3:]
+    elif ofs > 0:
+        artist = tagtxt[:ofs]
+        title = tagtxt[ofs + 3 :]
+
+    try:
+        debug("writing tags")
+        mt = mutagen.File(fn, easy=True)
+        mt.add_tags()
+
+        mt["title"] = title
+        if artist:
+            mt["artist"] = artist
+
+        mt.save(v2_version=4)
+    except Exception as ex:
+        warn("failed to write tags: {}".format(repr(ex)))
+
+    return fn
+
+
+def stamp_mp3(fn, start_ts, eof_ts, lastmod):
+    ts = lastmod - (eof_ts - start_ts)
+    os.utime(fn, (int(time.time()), ts))
+    return ts
+
+
 def main():
-    if len(sys.argv) <= 1:
-        print("usage: {} some.mp3".format(sys.argv[0]))
-        sys.exit(1)
+    ap = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("-d", action="store_true", help="enable debug output")
+    ap.add_argument("-o", metavar="DIR", help="output directory")
+    ap.add_argument("--no-split", action="store_true", help="do not split the mp3")
+    ap.add_argument("ICY_MP3", help="icecast recording with inband metadata")
+    ar = ap.parse_args()
 
     if WINDOWS:
         os.system("rem")  # best girl
 
-    logging.basicConfig(
-        level=logging.DEBUG,  # INFO DEBUG
-        format="\033[36m%(asctime)s.%(msecs)03d\033[0m %(message)s",
-        datefmt="%H%M%S",
-    )
-    lh = logging.StreamHandler(sys.stderr)
-    lh.setFormatter(LoggerFmt())
-    logging.root.handlers = [lh]
+    configure_logger(ar.d)
 
     rc = 0
     t0 = time.time()
-    fn = sys.argv[1]
+    fn = ar.ICY_MP3
     sz = os.path.getsize(fn)
+    lastmod = os.path.getmtime(fn)
     print("using {} ({:.2f} MiB)".format(fn, sz / 1024.0 / 1024))
 
     base = fn.replace("\\", "/").split("/")[-1]
@@ -818,8 +862,12 @@ def main():
     fn_frames = base + ".defrost.frames"
     fn_silence = base + ".defrost.silence"
 
+    outdir = ar.o or "defrost-{}-{}".format(base, os.getpid())
+    if not ar.no_split:
+        os.mkdir(outdir)
+
     if not os.path.exists(fn_mp3):
-        print("\n\n")
+        print("\n")
         info("running icy verification pass\n")
         try:
             with IcyVerifier(fn) as metasrc1:
@@ -831,13 +879,13 @@ def main():
             uprint(exc + "\nWARNING: verification failed (will continue in 2sec)")
             time.sleep(2)
 
-        print("\n\n")
+        print("\n")
         info("running decode pass")
         run_defrost(fn, fn_mp3, fn_idx, sz)
 
     sz = os.path.getsize(fn_mp3)
     if not os.path.exists(fn_frames):
-        print("\n\n")
+        print("\n")
         info("collecting frames with FFmpeg")
         buf = []
         pos = 0
@@ -858,7 +906,7 @@ def main():
             msg = "\nWARNING:\n  something funky with the file,\n  {} bytes total but\n  {} bytes last-frame\n"
             warn(msg.format(sz, pos))
 
-    print("\n\n")
+    print("\n")
     info("reading eof from frametab")
     with open(fn_frames, "r", IO_BUFSZ) as f:
         f.seek(0, os.SEEK_END)
@@ -873,35 +921,8 @@ def main():
     msg = "frame: {}\npos: {}\nts: {:.3f}"
     print(msg.format(end_frame, end_pos, end_ts))
 
-    if not os.path.exists(fn_silence) and False:
-        print("\n\n")
-        info("detecting silence with FFmpeg\n")
-        num_each = {}
-        queue = []
-        with open(fn_silence, "wb") as f:
-            for nframe, db, start, end, end2 in detect_silence(fn_mp3):
-                ln = "{} {} {:.2f} {:.2f} {:.2f}".format(nframe, db, start, end, end2)
-                queue.append([nframe, ln])
-
-                msg = "{:.2f}% ".format(nframe * 100.0 / end_frame)
-                num_each[db] = num_each.get(db, 0) + 1
-                for k, v in sorted(num_each.items()):
-                    msg += "{}dB:{} ".format(k, v)
-
-                reprint(msg + " #" + ln)
-
-                if len(queue) > 1000:
-                    queue.sort()
-                    for _, ln in queue[:500]:
-                        f.write(ln.encode("utf-8") + b"\n")
-
-                    queue = queue[500:]
-
-            for _, ln in queue:
-                f.write(ln.encode("utf-8") + b"\n")
-
     if not os.path.exists(fn_silence):
-        print("\n\n")
+        print("\n")
         info("detecting silence with FFmpeg\n")
         tasks = []
         for n, db in enumerate([30, 40, 50, 60]):
@@ -1045,18 +1066,15 @@ def main():
             )
             info(msg)
 
-            f_defrosted.seek(ofs1)
-            with open("out/{:5d}.mp3".format(ntrack), "wb") as f_out:
-                rem = ofs2 - ofs1
-                while rem > 0:
-                    buf = f_defrosted.read(4096)
-                    rem -= len(buf)
-                    if rem and not buf:
-                        raise Exception("hit eof in defrosted mp3")
+            tagbin = tag["t"]
+            tagtxt, enc, _ = tag2text(tagbin)
+            debug("tag: [{}] [{}]".format(enc, tagtxt))
 
-                    f_out.write(buf)
+            if not ar.no_split:
+                fn = split_mp3(f_defrosted, ntrack, ofs1, ofs2, outdir, tagtxt)
+                ts = stamp_mp3(fn, ts1, end_ts, lastmod)
+                info("wrote [{}] [{}]".format(ts, fn))
 
-            # print(tag)
             tag = tag2
 
     # print(tag2)
