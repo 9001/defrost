@@ -8,8 +8,10 @@ import sys
 import time
 import json
 import base64
+import pprint
 import codecs
 import struct
+import hashlib
 import logging
 import argparse
 import platform
@@ -26,7 +28,7 @@ except:
 
 """
 defrost.py: split broken icecast recordings into separate mp3s
-2020-12-31, v0.8, ed <irc.rizon.net>, MIT-Licensed
+2020-12-31, v0.9, ed <irc.rizon.net>, MIT-Licensed
 https://ocv.me/dev/?defrost.py
 
 status:
@@ -37,6 +39,10 @@ howto:
   icecast metadata; to create such a recording do this:
   
     wget -U 'MPlayer' --header "Icy-MetaData: 1" -S "https://stream.r-a-d.io/main.mp3"
+
+new in this version:
+  less sanity checks because FFmpeg cray
+  support for read-only/nas sources
 
 NOTE:
   the MP3s will be timestamped based on the source file, so
@@ -739,6 +745,10 @@ def find_silence(silents, target_sec):
             if t1 > target_sec + 30:
                 break
 
+            # NOTE keep the offsets above the same
+            #   maybe it could go skipping some segments otherwise
+            #   (too tired to actually check if thats the case)
+
             t = t1 + (t2 - t1) * 0.8
             dist = abs(target_sec - t)
             if not best_dist or dist < best_dist:
@@ -856,13 +866,17 @@ def main():
     lastmod = os.path.getmtime(fn)
     print("using {} ({:.2f} MiB)".format(fn, sz / 1024.0 / 1024))
 
+    src_hash = hashlib.sha1(fn.encode('utf-8', 'ignore')).digest()
+    src_hash = base64.urlsafe_b64encode(src_hash)[:8]
     base = fn.replace("\\", "/").split("/")[-1]
-    fn_mp3 = base + ".defrost.mp3"
-    fn_idx = base + ".defrost.idx"
-    fn_frames = base + ".defrost.frames"
-    fn_silence = base + ".defrost.silence"
+    localbase = base + ".defrost-" + src_hash
+    
+    fn_mp3 = localbase + ".mp3"
+    fn_idx = localbase + ".idx"
+    fn_frames = localbase + ".frames"
+    fn_silence = localbase + ".silence"
 
-    outdir = ar.o or "defrost-{}-{}".format(base, os.getpid())
+    outdir = ar.o or "defrost-{}-{}-{}".format(base, src_hash, os.getpid())
     if not ar.no_split:
         os.mkdir(outdir)
 
@@ -1028,29 +1042,28 @@ def main():
                 else:
                     break
 
-            if quiet_frame1 and (abs(quiet_frame1 - frame1) > 1000):
-                msg = "soemthing desynced:\nf1 {} ofs1 {} ts1 {} quiet\nf1 {} ofs1 {} ts1 {} fcache\n"
-                msg = msg.format(
-                    quiet_frame1,
-                    ofs1,
-                    quiet_ts1,
-                    frame1,
-                    ofs1,
-                    ts1,
-                )
-                raise Exception(msg)
-
-            if quiet_frame2 and (abs(quiet_frame2 - frame2) > 1000):
-                msg = "soemthing desynced:\nf2 {} ofs2 {} ts2 {} quiet\nf2 {} ofs2 {} ts2 {} fcache\n"
-                msg = msg.format(
-                    quiet_frame2,
-                    ofs2,
-                    quiet_ts2,
-                    frame2,
-                    ofs2,
-                    ts2,
-                )
-                raise Exception(msg)
+            # ffmpeg does some sick drifts occasionally
+            # so lets be extremely lenient with ffmpeg/ffprobe differences
+            panik = False
+            checks = [
+                ["quiet1", quiet_frame1, quiet_ts1],
+                ["quiet2", quiet_frame2, quiet_ts2],
+                ["fc1", frame1, ts1],
+                ["fc2", frame2, ts2]
+            ]
+            results = []
+            for label, frame, ts in checks:
+                if not frame or frame < 10 or ts < 1:
+                    continue
+                results.append(frame / ts)
+            
+            results.sort()
+            if results and results[-1] / results[0] >= 1.05:  # bump if necessary, just guessing
+                msg = "something desynced:\n{}".format(pprint.pformat([checks, results]))
+                if YOLO:
+                    error(msg)
+                else:
+                    raise Exception(msg)
 
             msg = "track #{}, ofs {}..{}, sec {}..{}, cut {}..{}, delta {:.2f}..{:.2f}"
             msg = msg.format(
