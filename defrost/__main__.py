@@ -29,7 +29,7 @@ except:
 
 """
 defrost.py: split broken icecast recordings into separate mp3s
-2021-01-01, v0.10, ed <irc.rizon.net>, MIT-Licensed
+2021-01-01, v0.11, ed <irc.rizon.net>, MIT-Licensed
 https://ocv.me/dev/?defrost.py
 
 status:
@@ -46,11 +46,9 @@ howto:
   otherwise you have to provide --metaint $yourvalue
 
 new in this version:
-  doesn't skip the last track
-  doesn't skip the first track in left-truncated sources
-  fix crossover in silence detector
-  fix binarysearch in framecache builder
-  changed the filenames a bit
+  fix bad frame/time sync check for quiet ranges
+  fix framecache truncating too early
+  add -a (album title)
 
 NOTE:
   the MP3s will be timestamped based on the source file, so
@@ -75,7 +73,7 @@ except ImportError as ex:
     )
     sys.exit(1)
 
-from mutagen.id3 import ID3, TIT2, TPE1, COMM, TDRC
+from mutagen.id3 import ID3, TIT2, TPE1, TALB, COMM, TDRC
 
 
 YOLO = False  # cfg: True disengages safety checks
@@ -735,9 +733,11 @@ def build_framecache(f_frames, ofs1, ofs2):
         if ofs < lower_byte:
             continue
         if sec2 is None:
-            sec2 = sec
-        if sec >= sec2 + extra_sec:
-            break
+            if ofs >= ofs2:
+                sec2 = sec
+        else:
+            if sec >= sec2 + extra_sec:
+                break
         framecache.append([nframe, ofs, sec])
 
     if not framecache:
@@ -748,7 +748,8 @@ def build_framecache(f_frames, ofs1, ofs2):
 
 
 def find_silence(silents, target_sec, min_lower):
-    best_sec = None
+    best_sec_mid = None
+    best_sec_end = None
     best_frame = None
     best_dist = None
     best_db = None
@@ -758,6 +759,9 @@ def find_silence(silents, target_sec, min_lower):
         if db <= 40 and best_dist:
             # skip 40dB if we have anything at all
             break
+
+        if db not in silents:
+            continue
 
         for nframe, t1, t2 in silents[db]:
             if t2 < lower_bound:
@@ -772,12 +776,13 @@ def find_silence(silents, target_sec, min_lower):
                 if not best_db or dist < best_dist / 4:
                     best_dist = dist
                     best_frame = nframe
-                    best_sec = t
+                    best_sec_mid = t
+                    best_sec_end = t2
 
-    if best_sec:
-        return [best_sec, best_frame]
+    if best_sec_mid:
+        return [best_sec_mid, best_sec_end, best_frame]
     else:
-        return [target_sec, None]
+        return [target_sec, None, None]
 
 
 def sanitize_fn(fn):
@@ -833,7 +838,7 @@ def split_mp3(f_defrosted, ntrack, ofs1, ofs2, outdir, tagtxt):
     return fn
 
 
-def tag_mp3(fn, tagtxt, timestr):
+def tag_mp3(fn, tagtxt, timestr, album):
     artist = None
     ofs = tagtxt.find(" - ")
     if ofs < 0:
@@ -853,6 +858,9 @@ def tag_mp3(fn, tagtxt, timestr):
         id3.add(TIT2(encoding=3, text=title))
         if artist:
             id3.add(TPE1(encoding=3, text=artist))
+
+        if album:
+            id3.add(TALB(encoding=3, text=album))
 
         id3.add(TDRC(encoding=3, text=timestr))
         id3.add(COMM(encoding=3, text=comment))
@@ -876,6 +884,7 @@ def main():
     ap.add_argument("-d", action="store_true", help="enable debug output")
     ap.add_argument("-f", action="store_true", help="overwrite existing split")
     ap.add_argument("-o", metavar="DIR", help="output directory")
+    ap.add_argument("-a", metavar="ALBUM", help="album title for id3 tags")
     ap.add_argument("--metaint", type=int, help="icecast metadata interval", default=METAINT)
     ap.add_argument("--no-split", action="store_true", help="do not split the mp3")
     ap.add_argument("--no-id3", action="store_true", help="do not write id3 tags")
@@ -946,6 +955,9 @@ def main():
                 os.mkdir(outdir)
                 break
             except:
+                if n == 2:
+                    raise
+
                 time.sleep(0.3)
                 pass
 
@@ -1089,15 +1101,15 @@ def main():
 
             if not framecache or framecache[0][1] > lower or framecache[-1][1] < upper:
                 if framecache:
-                    msg = "framecache insufficient, {} > {} or {} < {}"
+                    msg = "framecache insufficient, {:,} > {:,} or {:,} < {:,}"
                     debug(msg.format(framecache[0][1], lower, framecache[-1][1], upper))
                 framecache = build_framecache(f_frames, ofs1, ofs2)
-                msg = "framecache covers frame {}..{}, ofs {}..{}, ts {}..{}"
+                msg = "framecache covers frame {}..{}, ofs {:,}..{:,}, ts {}..{}"
                 fc0 = framecache[0]
                 fc1 = framecache[-1]
                 debug(msg.format(fc0[0], fc1[0], fc0[1], fc1[1], fc0[2], fc1[2]))
                 if fc0[1] > ofs1 + 4096 or fc1[1] < ofs2 - 4096:
-                    msg = "framecache still insufficient, {} > {} or {} < {}"
+                    msg = "framecache still insufficient, {:,} > {:,} or {:,} < {:,}"
                     raise Exception(msg.format(fc0[1], ofs1, fc1[1], ofs2))
 
             tag_ts1 = None
@@ -1130,9 +1142,12 @@ def main():
             ts1 = tag_ts1
             ts2 = tag_ts2
             if idx_ln:
-                quiet_ts2, quiet_frame2 = find_silence(silents, tag_ts2, next_sec)
+                quiet_ts2, quiet_ts_ref, quiet_frame2 = find_silence(
+                    silents, tag_ts2, next_sec
+                )
             else:
                 quiet_ts2 = tag_ts2
+                quiet_ts_ref = tag_ts2
                 quiet_frame2 = frame2
 
             for nframe, ofs, ts in framecache:
@@ -1146,7 +1161,7 @@ def main():
             # ffmpeg does some sick drifts occasionally
             # so lets be extremely lenient with ffmpeg/ffprobe differences
             checks = [
-                ["quiet2", quiet_frame2, quiet_ts2],
+                ["quiet2", quiet_frame2, quiet_ts_ref],
                 ["fc1", frame1, ts1],
                 ["fc2", frame2, ts2],
             ]
@@ -1157,9 +1172,8 @@ def main():
                 results.append(frame / ts)
 
             results.sort()
-            if (
-                results and results[-1] / results[0] >= 1.05
-            ):  # bump if necessary, just guessing
+            # bump threshold below if necessary, just guessing
+            if results and results[-1] / results[0] >= 1.05:
                 msg = "something desynced:\n{}".format(
                     pprint.pformat([checks, results])
                 )
@@ -1193,7 +1207,7 @@ def main():
                 timestr = datetime.utcfromtimestamp(unix).strftime(fmt)
                 fn = split_mp3(f_defrosted, ntrack, ofs1, ofs2, outdir, tagtxt)
                 if not ar.no_id3:
-                    tag_mp3(fn, tagtxt, timestr)
+                    tag_mp3(fn, tagtxt, timestr, ar.a)
 
                 os.utime(fn, (int(time.time()), unix))
                 info("{:.0f}% wrote [{}] [{}]".format(perc, timestr, fn))
@@ -1202,8 +1216,12 @@ def main():
             tag = tag2
 
     print()
+    tmp_files = [fn_mp3, fn_idx, fn_frames, fn_silence]
+    msg = "finished in {:.2f} sec with {} errors\nyou can delete these now:\n  {}".format(
+        time.time() - t0, rc or "no", "\n  ".join(tmp_files)
+    )
     fun = error if rc else info
-    fun("finished in {:.2f} sec with {} errors".format(time.time() - t0, rc or "no"))
+    fun(msg)
     sys.exit(rc)
 
 
@@ -1233,3 +1251,11 @@ if __name__ == "__main__":
 
 
 # cat -n 5g-ok.mp3.defrost-z66AMwbk-5370838524.idx | sed -r 's/", "z": .*//; s/(.*), "t": "(.*)/\2 \1/' | while read b64 v; do printf '%s %s\n' "$v" "$(printf '%s\n' "$b64" | base64 -d 2>/dev/null)"; done
+
+
+# strings -td -eS -n 13 main.mp3.35 | grep StreamTitle= | head -n 1
+# 16001 StreamTitle='ワルキューレ/...
+#
+# dd if=main.mp3.35 bs=4M skip=9701 | tail -c+1831037 | strings -td -eS -n 13 | grep StreamTitle= | head
+# 16001 StreamTitle='Jeff Williams
+
