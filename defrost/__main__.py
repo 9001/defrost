@@ -10,6 +10,7 @@ import json
 import base64
 import pprint
 import codecs
+import shutil
 import struct
 import hashlib
 import logging
@@ -28,7 +29,7 @@ except:
 
 """
 defrost.py: split broken icecast recordings into separate mp3s
-2020-12-31, v0.9, ed <irc.rizon.net>, MIT-Licensed
+2021-01-01, v0.10, ed <irc.rizon.net>, MIT-Licensed
 https://ocv.me/dev/?defrost.py
 
 status:
@@ -37,12 +38,19 @@ status:
 howto:
   this requiers an icecast recording which includes the
   icecast metadata; to create such a recording do this:
-  
+
     wget -U 'MPlayer' --header "Icy-MetaData: 1" -S "https://stream.r-a-d.io/main.mp3"
 
+  take note of the headers that the server sends back,
+  especially the "icy-metaint" which should be 16000,
+  otherwise you have to provide --metaint $yourvalue
+
 new in this version:
-  less sanity checks because FFmpeg cray
-  support for read-only/nas sources
+  doesn't skip the last track
+  doesn't skip the first track in left-truncated sources
+  fix crossover in silence detector
+  fix binarysearch in framecache builder
+  changed the filenames a bit
 
 NOTE:
   the MP3s will be timestamped based on the source file, so
@@ -66,6 +74,8 @@ except ImportError as ex:
         )
     )
     sys.exit(1)
+
+from mutagen.id3 import ID3, TIT2, TPE1, COMM, TDRC
 
 
 YOLO = False  # cfg: True disengages safety checks
@@ -304,10 +314,7 @@ def ensure_parsers_agree(metasrc1, metasrc2, sz):
 
         if err:
             msg = "scanner/verifier disagreement,\n{} [{}]\n{} [{}]".format(
-                pos1,
-                tag2text(buf1)[0],
-                pos2,
-                tag2text(buf2)[0],
+                pos1, tag2text(buf1)[0], pos2, tag2text(buf2)[0],
             )
             msg += "\nthis is not an error (should just be ignored) "
             msg += "but raising for inspection until properly tested"
@@ -318,8 +325,6 @@ def defrost(fn, metasrc, sz):
     """
     yields [lower, upper, zeros, tags]
     """
-    yield_ofs = 0
-    zeros = []
     tags = []
     ofs1 = 0
     bm1 = None
@@ -334,9 +339,11 @@ def defrost(fn, metasrc, sz):
 
         if not bm1:
             if ofs2 != METAINT:
-                raise Exception(
-                    "initial tag at {:x}, expected at {:x}".format(ofs2, METAINT)
-                )
+                msg = "initial tag at {:x}, expected at {:x}".format(ofs2, METAINT)
+                if YOLO:
+                    error(msg)
+                else:
+                    raise Exception(msg)
             after_tag = ofs1
             zeros_up = []
         else:
@@ -345,20 +352,13 @@ def defrost(fn, metasrc, sz):
 
         zeros_dn = zerochk(f, after_tag, ofs2, False)
 
-        # default to yielding all data between previous and current tag
-        mp3_ofs1 = after_tag
-        mp3_ofs2 = ofs2
-
         if bm1 and ofs2 - ofs1 == METAINT + len(bm1) + 1:
             # immediate tag change with correct metaint spacing
-            zeros_up = []
-            zeros_dn = []
+            yield [after_tag, ofs2, [], tags]
 
         elif zeros_up and zeros_up == zeros_dn:
             # another best case scenario; no corruption
-            zeros.extend(zeros_up)
-            zeros_up = []
-            zeros_dn = []
+            yield [after_tag, ofs2, zeros_up, tags]
 
         else:
             # something's fucky
@@ -406,7 +406,7 @@ def defrost(fn, metasrc, sz):
                     )
                 )
 
-            if gap_upper - gap_lower > METAINT + 1:
+            elif gap_upper - gap_lower > METAINT + 1:
                 # best sync guess leaves a chunk of unknown between the tags,
                 # include it with the previous track and hope ffmpeg fixes it
                 gap_lower = gap_upper - METAINT
@@ -417,24 +417,25 @@ def defrost(fn, metasrc, sz):
                 #     )
                 # )
 
+            else:
+                # probably good data around the gaps; include it
+                gap_lower = min(ofs2, gap_lower + METAINT - 1)
+                gap_upper = max(ofs1, 1 + gap_upper - METAINT)
+
             if zeros_up:
-                zeros.extend(zeros_up)
+                yield [after_tag, gap_lower, zeros_up, tags]
 
-            mp3_ofs1 = yield_ofs
-            mp3_ofs2 = gap_lower + METAINT
+            if zeros_dn:
+                yield [gap_upper, ofs2, zeros_dn, tags]
 
-        yield [mp3_ofs1, mp3_ofs2, zeros, tags]
-        yield_ofs = mp3_ofs2
         tags = tags[-1:]
-        zeros = zeros_dn
         ofs1 = ofs2
         bm1 = bm2
 
     # final readout
     fsz = os.path.getsize(fn)
     after_tag = ofs1 + len(bm1) + 1
-    # zeros.extend([ofs2, after_tag])
-    zeros.extend(zerochk(f, after_tag, fsz, True))
+    zeros = zerochk(f, after_tag, fsz, True)
     yield [after_tag, fsz, zeros, tags]
 
 
@@ -447,7 +448,7 @@ def run_defrost(fn, fn_mp3, fn_idx, sz):
         for lower, upper, zeros, tags in defrost(fn, metasrc, sz):
             tags = [x.rstrip(b"\x00")[13:-2] for x in tags]
             ntags += 1
-            if ntags % 10 == 0 or True:
+            if ntags % 5 == 0:
                 perc = lower * 100.0 / sz
                 msg = "{0:.2f}%  #{1}  {2:x}..{3:x}  {2:}..{3:}  z{4}  t{5}  [{6}]".format(
                     perc,
@@ -599,7 +600,7 @@ def detect_silence_one(fn_mp3, db, len_sec, xpos, ret):
         "-hide_banner",
         "-v", "fatal",
         "-i", fn_mp3,
-        "-af", "ametadata=mode=add:key=a:value=a,silencedetect=n=-{}dB:d=0.7,ametadata=mode=print:file=-".format(db),
+        "-af", "ametadata=mode=add:key=a:value=a,silencedetect=n=-{}dB:d=0.2,ametadata=mode=print:file=-".format(db),
         "-f", "null", "-",
     ]
     # fmt: on
@@ -690,64 +691,80 @@ def detect_silence_one(fn_mp3, db, len_sec, xpos, ret):
 
 
 def build_framecache(f_frames, ofs1, ofs2):
-    lower = ofs1 - 192 * 128 * 300
-    upper = ofs2 + 192 * 128 * 3600
-    msg = "rebuild framecache {}..{} for {}..{}".format(lower, upper, ofs1, ofs2)
+    lower_byte = max(0, ofs1 - 320 * 128 * 60)
+    extra_sec = 3600
+    msg = "rebuild framecache {}..+{} for {}..{}".format(
+        lower_byte, extra_sec, ofs1, ofs2
+    )
     debug(msg)
     nframe = 0
     framecache = []
 
     f_frames.seek(0, os.SEEK_END)
-    txt_sz = f_frames.tell()
-    hop_sz = hop_pos = txt_sz / 2
-    while hop_sz > 9000:
-        hop_sz /= 2
+    txt_sz = hop_sz = f_frames.tell()
+    hop_pos = 0
+    safe = 0
+    sm = 9000  # slingringsmonn
+    while hop_sz > sm:
+        hop_sz //= 2
         f_frames.seek(hop_pos)
-        next(f_frames)
-        ofs = int(next(f_frames).split(" ")[1])
-        if ofs > ofs1 - 9000:
-            hop_pos = max(0, hop_pos - hop_sz)
-        else:
-            hop_pos += hop_sz
+        if hop_pos != 0:
+            next(f_frames)
 
+        ofs = int(next(f_frames).split(" ")[1])
+        if ofs < lower_byte:
+            safe = hop_pos
+
+        if ofs > lower_byte - sm:
+            hop_pos = max(0, hop_pos - hop_sz)
+        elif ofs < lower_byte - sm * 2:
+            hop_pos = min(txt_sz - sm, hop_pos + hop_sz)
+        else:
+            break
+
+    f_frames.seek(safe)
+    if safe != 0:
+        next(f_frames)
+
+    sec2 = None
     for ln in f_frames:
         nframe, ofs, sec = ln.split(" ")
         nframe = int(nframe)
         ofs = int(ofs)
         sec = float(sec)
-        if ofs < lower:
+        if ofs < lower_byte:
             continue
-        if ofs > upper:
+        if sec2 is None:
+            sec2 = sec
+        if sec >= sec2 + extra_sec:
             break
         framecache.append([nframe, ofs, sec])
 
     if not framecache:
         msg = "could not build framecache ofs {}..{}, last seen ofs {}, sec {}"
-        raise Exception(msg.format(lower, upper, ofs, sec))
+        raise Exception(msg.format(ofs1, ofs2, ofs, sec))
 
     return framecache
 
 
-def find_silence(silents, target_sec):
+def find_silence(silents, target_sec, min_lower):
     best_sec = None
     best_frame = None
     best_dist = None
     best_db = None
+    lower_bound = max(min_lower, target_sec - 30)
+    upper_bound = max(min_lower, target_sec + 30)
     for db in [60, 50, 40, 30]:
-        if db <= 30 and best_dist:
-            # skip 30dB if we have anything at all
+        if db <= 40 and best_dist:
+            # skip 40dB if we have anything at all
             break
 
         for nframe, t1, t2 in silents[db]:
-            if t2 < target_sec - 30:
+            if t2 < lower_bound:
                 continue
 
-            if t1 > target_sec + 30:
+            if t1 > upper_bound:
                 break
-
-            # NOTE keep the offsets above the same
-            #   maybe it could go skipping some segments otherwise
-            #   (too tired to actually check if thats the case)
 
             t = t1 + (t2 - t1) * 0.8
             dist = abs(target_sec - t)
@@ -794,7 +811,7 @@ def split_mp3(f_defrosted, ntrack, ofs1, ofs2, outdir, tagtxt):
     title = sanitize_fn(tagtxt) or "untitled"
     while True:
         try:
-            fn = "{}/{}. {}.mp3".format(outdir, ntrack, title)
+            fn = "{}/{}. {}.mp3".format(outdir, ntrack, title or "x")
             f = open(fn, "wb")
             break
         except:
@@ -805,58 +822,74 @@ def split_mp3(f_defrosted, ntrack, ofs1, ofs2, outdir, tagtxt):
     f_defrosted.seek(ofs1)
     rem = ofs2 - ofs1
     while rem > 0:
-        buf = f_defrosted.read(4096)
-        rem -= len(buf)
-        if rem and not buf:
+        buf = f_defrosted.read(min(rem, 4096))
+        if not buf:
             raise Exception("hit eof in defrosted mp3")
 
+        rem -= len(buf)
         f.write(buf)
 
     f.close()
+    return fn
 
+
+def tag_mp3(fn, tagtxt, timestr):
     artist = None
     ofs = tagtxt.find(" - ")
     if ofs < 0:
         title = tagtxt
-    if ofs == 0:
+    elif ofs == 0:
         title = tagtxt[3:]
-    elif ofs > 0:
+    else:
         artist = tagtxt[:ofs]
         title = tagtxt[ofs + 3 :]
 
     try:
         debug("writing tags")
-        mt = mutagen.File(fn, easy=True)
-        mt.add_tags()
+        comment = "{} UTC, defrost.py".format(timestr)
+        timestr = timestr.replace(", ", "T")
 
-        mt["title"] = title
+        id3 = ID3()
+        id3.add(TIT2(encoding=3, text=title))
         if artist:
-            mt["artist"] = artist
+            id3.add(TPE1(encoding=3, text=artist))
 
-        mt.save(v2_version=4)
+        id3.add(TDRC(encoding=3, text=timestr))
+        id3.add(COMM(encoding=3, text=comment))
+        id3.save(fn)
     except Exception as ex:
         warn("failed to write tags: {}".format(repr(ex)))
 
-    return fn
 
+def add_sentinel(gen):
+    for x in gen:
+        yield x
 
-def stamp_mp3(fn, start_ts, eof_ts, lastmod):
-    ts = lastmod - (eof_ts - start_ts)
-    os.utime(fn, (int(time.time()), ts))
-    return ts
+    yield None
 
 
 def main():
+    global YOLO, METAINT
+
+    # fmt: off
     ap = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-d", action="store_true", help="enable debug output")
+    ap.add_argument("-f", action="store_true", help="overwrite existing split")
     ap.add_argument("-o", metavar="DIR", help="output directory")
+    ap.add_argument("--metaint", type=int, help="icecast metadata interval", default=METAINT)
     ap.add_argument("--no-split", action="store_true", help="do not split the mp3")
+    ap.add_argument("--no-id3", action="store_true", help="do not write id3 tags")
+    ap.add_argument("--yolo", action="store_true", help="less sanity checks (for buggy files)")
+    ap.add_argument("--clean", action="store_true", help="redo most of the cached steps")
     ap.add_argument("ICY_MP3", help="icecast recording with inband metadata")
     ar = ap.parse_args()
+    # fmt: on
 
     if WINDOWS:
         os.system("rem")  # best girl
 
+    YOLO = ar.f
+    METAINT = ar.metaint
     configure_logger(ar.d)
 
     rc = 0
@@ -864,21 +897,57 @@ def main():
     fn = ar.ICY_MP3
     sz = os.path.getsize(fn)
     lastmod = os.path.getmtime(fn)
-    print("using {} ({:.2f} MiB)".format(fn, sz / 1024.0 / 1024))
+    info("using {} ({:.2f} MiB)".format(fn, sz / 1024.0 / 1024))
 
-    src_hash = hashlib.sha1(fn.encode('utf-8', 'ignore')).digest()
-    src_hash = base64.urlsafe_b64encode(src_hash)[:8]
+    path_hash = hashlib.sha1(fn.encode("utf-8", "ignore")).digest()
+    path_hash = base64.urlsafe_b64encode(path_hash)[:8].decode("ascii")
+
+    debug("hashing final 64 MiB")
+    hasher = hashlib.sha1()
+    with open(fn, "rb", IO_BUFSZ) as f:
+        f.seek(max(0, sz - 64 * 1024 * 1024))
+        while True:
+            buf = f.read(4096)
+            if not buf:
+                break
+
+            hasher.update(buf)
+
+    file_hash = hasher.digest()
+    file_hash = base64.urlsafe_b64encode(file_hash)[:8].decode("ascii")
+
     base = fn.replace("\\", "/").split("/")[-1]
-    localbase = base + ".defrost-" + src_hash
-    
+    localbase = "{}.defrost-{}-{}".format(base, file_hash, sz)
+    # localbase += "a"  # cfg: when windows says no
+
+    outdir = ar.o or localbase
+    info("using {} for cache".format(localbase))
+    info("using {} for outdir".format(outdir))
+
     fn_mp3 = localbase + ".mp3"
     fn_idx = localbase + ".idx"
     fn_frames = localbase + ".frames"
     fn_silence = localbase + ".silence"
+    if ar.clean:
+        debug("deleting cache")
+        drop = [fn_frames, fn_silence]
+        # drop.extend([fn_mp3, fn_idx])
+        for f in drop:
+            if os.path.exists(f):
+                os.unlink(f)
 
-    outdir = ar.o or "defrost-{}-{}-{}".format(base, src_hash, os.getpid())
+    if ar.f and os.path.exists(outdir):
+        debug("deleting old split")
+        shutil.rmtree(outdir)
+
     if not ar.no_split:
-        os.mkdir(outdir)
+        for n in range(3):
+            try:
+                os.mkdir(outdir)
+                break
+            except:
+                time.sleep(0.3)
+                pass
 
     if not os.path.exists(fn_mp3):
         print("\n")
@@ -891,11 +960,20 @@ def main():
             rc += 1
             exc = traceback.format_exc()
             uprint(exc + "\nWARNING: verification failed (will continue in 2sec)")
-            time.sleep(2)
+            if not YOLO:
+                time.sleep(2)
 
         print("\n")
         info("running decode pass")
         run_defrost(fn, fn_mp3, fn_idx, sz)
+
+    if os.path.exists(fn_frames):
+        with open(fn_frames, "r") as f:
+            ln = next(f)
+            fields = ln.split(" ")
+            if len(fields) != 3 or fields[0] != "0":
+                warn("deleting old {} (format has changed)".format(fn_frames))
+                os.unlink(fn_frames)
 
     sz = os.path.getsize(fn_mp3)
     if not os.path.exists(fn_frames):
@@ -903,7 +981,7 @@ def main():
         info("collecting frames with FFmpeg")
         buf = []
         pos = 0
-        nframes = 0
+        nframes = -1
         with open(fn_frames, "w") as f:
             for pos, ts in collect_frames(fn_mp3):
                 nframes += 1
@@ -981,23 +1059,34 @@ def main():
         fn_mp3, "rb"
     ) as f_defrosted:
         tag = None
-        for ln in f_idx:
-            tag2 = json.loads(ln)
-            tag2 = {
-                "o": tag2["o"],
-                "t": base64.urlsafe_b64decode(tag2["t"].encode("ascii")),
-            }
-            if not tag:
-                tag = tag2
-                continue
+        next_sec = None  # position (in absolute seconds) that was last returned
+        for idx_ln in add_sentinel(f_idx):
+            if idx_ln:
+                tag2 = json.loads(idx_ln)
+                tag2 = {
+                    "o": tag2["o"],
+                    "t": base64.urlsafe_b64decode(tag2["t"].encode("ascii")),
+                }
+                if not tag:
+                    tag = tag2
+                    next_sec = 0
+                    continue
+            else:
+                tag2 = {"o": sz}  # read until eof
 
             ntrack += 1
             ofs1 = tag["o"]
             ofs2 = tag2["o"]
-            debug("track #{}, ofs {}..{}".format(ntrack, ofs1, ofs2))
+            perc = ofs1 * 100.0 / sz
+            debug("{:.0f}% track #{}, ofs {}..{}".format(perc, ntrack, ofs1, ofs2))
 
-            lower = ofs1 - 30
-            upper = ofs2 + 30
+            # 38 frames in 1 sec (1152 samples per frame),
+            # 192k=627b, 256k=836bm 320k=1045b
+            lower = max(ofs1 - 320 * 128 * 60, 0)
+            upper = min(ofs2 + 320 * 128 * 60, sz)
+            if framecache and framecache[0][0] == 0:
+                lower = framecache[0][1]  # anchored to start of file already
+
             if not framecache or framecache[0][1] > lower or framecache[-1][1] < upper:
                 if framecache:
                     msg = "framecache insufficient, {} > {} or {} < {}"
@@ -1005,8 +1094,11 @@ def main():
                 framecache = build_framecache(f_frames, ofs1, ofs2)
                 msg = "framecache covers frame {}..{}, ofs {}..{}, ts {}..{}"
                 fc0 = framecache[0]
-                fc1 = framecache[1]
+                fc1 = framecache[-1]
                 debug(msg.format(fc0[0], fc1[0], fc0[1], fc1[1], fc0[2], fc1[2]))
+                if fc0[1] > ofs1 + 4096 or fc1[1] < ofs2 - 4096:
+                    msg = "framecache still insufficient, {} > {} or {} < {}"
+                    raise Exception(msg.format(fc0[1], ofs1, fc1[1], ofs2))
 
             tag_ts1 = None
             tag_ts2 = None
@@ -1014,59 +1106,71 @@ def main():
             frame2 = None
             for nframe, ofs, ts in framecache:
                 # print("cmp {} {}".format(ofs, ofs2))
-                if not tag_ts1 or ofs <= ofs1:
-                    frame1 = nframe
-                    tag_ts1 = ts
-                elif not tag_ts2 or ofs <= ofs2:
+                if tag_ts1 is None:
+                    if ts >= next_sec:
+                        frame1 = nframe
+                        tag_ts1 = ts
+                        ofs1 = ofs
+                elif tag_ts2 is None or ofs <= ofs2:
                     frame2 = nframe
                     tag_ts2 = ts
                 else:
                     break
 
-            msg = "track #{}, ofs {}..{}, sec {}..{}, frame {}..{}"
-            debug(msg.format(ntrack, ofs1, ofs2, tag_ts1, tag_ts2, frame1, frame2))
+            if tag_ts1 is None:
+                a, b, c = framecache[0]
+                msg = "could not find next_sec {} in framecache, min is {} (#{}, {}b), gave up at {} (#{}, {}b)"
+                raise Exception(msg.format(next_sec, c, a, b, ts, nframe, ofs))
+
+            msg = "{:.0f}% track #{}, ofs {}..{}, sec {}..{}, frame {}..{}"
+            debug(
+                msg.format(perc, ntrack, ofs1, ofs2, tag_ts1, tag_ts2, frame1, frame2)
+            )
 
             ts1 = tag_ts1
             ts2 = tag_ts2
-            quiet_ts1, quiet_frame1 = find_silence(silents, tag_ts1)
-            quiet_ts2, quiet_frame2 = find_silence(silents, tag_ts2)
+            if idx_ln:
+                quiet_ts2, quiet_frame2 = find_silence(silents, tag_ts2, next_sec)
+            else:
+                quiet_ts2 = tag_ts2
+                quiet_frame2 = frame2
+
             for nframe, ofs, ts in framecache:
-                if ts <= quiet_ts1 and quiet_frame1:
-                    frame1 = nframe
-                    ofs1 = ofs
-                    ts1 = ts
-                elif ts <= quiet_ts2 and quiet_frame2:
-                    frame2 = nframe
-                    ofs2 = ofs
-                    ts2 = ts
-                else:
+                if ts > quiet_ts2:
                     break
+
+                frame2 = nframe
+                ofs2 = ofs
+                ts2 = ts
 
             # ffmpeg does some sick drifts occasionally
             # so lets be extremely lenient with ffmpeg/ffprobe differences
-            panik = False
             checks = [
-                ["quiet1", quiet_frame1, quiet_ts1],
                 ["quiet2", quiet_frame2, quiet_ts2],
                 ["fc1", frame1, ts1],
-                ["fc2", frame2, ts2]
+                ["fc2", frame2, ts2],
             ]
             results = []
-            for label, frame, ts in checks:
+            for _, frame, ts in checks:
                 if not frame or frame < 10 or ts < 1:
                     continue
                 results.append(frame / ts)
-            
+
             results.sort()
-            if results and results[-1] / results[0] >= 1.05:  # bump if necessary, just guessing
-                msg = "something desynced:\n{}".format(pprint.pformat([checks, results]))
+            if (
+                results and results[-1] / results[0] >= 1.05
+            ):  # bump if necessary, just guessing
+                msg = "something desynced:\n{}".format(
+                    pprint.pformat([checks, results])
+                )
                 if YOLO:
                     error(msg)
                 else:
                     raise Exception(msg)
 
-            msg = "track #{}, ofs {}..{}, sec {}..{}, cut {}..{}, delta {:.2f}..{:.2f}"
+            msg = "{:.0f}% track #{}, ofs {}..{}, sec {}..{}, cut {}..{}, delta {:.2f}..{:.2f}"
             msg = msg.format(
+                perc,
                 ntrack,
                 ofs1,
                 ofs2,
@@ -1081,16 +1185,22 @@ def main():
 
             tagbin = tag["t"]
             tagtxt, enc, _ = tag2text(tagbin)
-            debug("tag: [{}] [{}]".format(enc, tagtxt))
+            debug("{:.0f}% tag: [{}] [{}]".format(perc, enc, tagtxt))
 
             if not ar.no_split:
+                unix = int(lastmod - (end_ts - ts1))
+                fmt = "%Y-%m-%d, %H:%M:%S"
+                timestr = datetime.utcfromtimestamp(unix).strftime(fmt)
                 fn = split_mp3(f_defrosted, ntrack, ofs1, ofs2, outdir, tagtxt)
-                ts = stamp_mp3(fn, ts1, end_ts, lastmod)
-                info("wrote [{}] [{}]".format(ts, fn))
+                if not ar.no_id3:
+                    tag_mp3(fn, tagtxt, timestr)
 
+                os.utime(fn, (int(time.time()), unix))
+                info("{:.0f}% wrote [{}] [{}]".format(perc, timestr, fn))
+
+            next_sec = ts2
             tag = tag2
 
-    # print(tag2)
     print()
     fun = error if rc else info
     fun("finished in {:.2f} sec with {} errors".format(time.time() - t0, rc or "no"))
@@ -1114,3 +1224,12 @@ if __name__ == "__main__":
 # linux pypy2: 14.78 sec
 # linux  cpy3:  8.35 sec
 # linux  cpy2: 28.87 sec
+
+
+# printf '\n\n'; for n in {1..1024}; do printf '\033[2A%d\n' $n; cmp <(tail -c +$((909062+n)) <tailed.mp3.defrost-2p0U8fyy-10485760.mp3) tailed.mp3.defrost-2p0U8fyy-10485760/2.\ FLOW\ -\ COLORS.mp3 2>&1 | tee /dev/stderr | grep EOF && break; done
+#
+# cmp <(tail -c +$((145+909062+5271301+2056359+126015)) <tailed.mp3.defrost-2p0U8fyy-10485760.mp3) tailed.mp3.defrost-2p0U8fyy-10485760/5.\ s3rl\ -\ MTC.mp3
+# cmp: EOF on tailed.mp3.defrost-2p0U8fyy-10485760/5. s3rl - MTC.mp3 after byte 2121561, in line 9387
+
+
+# cat -n 5g-ok.mp3.defrost-z66AMwbk-5370838524.idx | sed -r 's/", "z": .*//; s/(.*), "t": "(.*)/\2 \1/' | while read b64 v; do printf '%s %s\n' "$v" "$(printf '%s\n' "$b64" | base64 -d 2>/dev/null)"; done
