@@ -29,11 +29,11 @@ except:
 
 """
 defrost.py: split broken icecast recordings into separate mp3s
-2021-01-01, v0.11, ed <irc.rizon.net>, MIT-Licensed
+2021-05-03, v0.12, ed <irc.rizon.net>, MIT-Licensed
 https://ocv.me/dev/?defrost.py
 
 status:
-  kinda works
+  works pretty well
 
 howto:
   this requiers an icecast recording which includes the
@@ -816,7 +816,7 @@ def split_mp3(f_defrosted, ntrack, ofs1, ofs2, outdir, tagtxt):
     title = sanitize_fn(tagtxt) or "untitled"
     while True:
         try:
-            fn = "{}/{}. {}.mp3".format(outdir, ntrack, title or "x")
+            fn = "{}/{:03d}. {}.mp3".format(outdir, ntrack, title or "x")
             f = open(fn, "wb")
             break
         except:
@@ -1231,17 +1231,12 @@ if __name__ == "__main__":
 
 # c:\Users\ed\bin\pypy3\pypy3.exe defrost.py 5g-ok.mp3
 # c:\Users\ed\bin\pypy2\pypy.exe defrost.py 5g-ok.mp3
-# defrost.py 5g-ok.mp3
 # c:\Python27\python.exe defrost.py 5g-ok.mp3
 #
-# win32 pypy3: 14.57 sec
-# win32 pypy2: 25.80 sec
-# win64  cpy3: 20.18 sec
-# win64  cpy2: 20.57 sec
-# linux pypy3: 65.55 sec
-# linux pypy2: 14.78 sec
-# linux  cpy3:  8.35 sec
-# linux  cpy2: 28.87 sec
+#        pypy2  pypy3   cpy2   cpy3
+# win32  25.80  14.57
+# win64                20.57  20.18
+# linux  14.78  65.55  28.87   8.35
 
 
 # printf '\n\n'; for n in {1..1024}; do printf '\033[2A%d\n' $n; cmp <(tail -c +$((909062+n)) <tailed.mp3.defrost-2p0U8fyy-10485760.mp3) tailed.mp3.defrost-2p0U8fyy-10485760/2.\ FLOW\ -\ COLORS.mp3 2>&1 | tee /dev/stderr | grep EOF && break; done
@@ -1253,9 +1248,31 @@ if __name__ == "__main__":
 # cat -n 5g-ok.mp3.defrost-z66AMwbk-5370838524.idx | sed -r 's/", "z": .*//; s/(.*), "t": "(.*)/\2 \1/' | while read b64 v; do printf '%s %s\n' "$v" "$(printf '%s\n' "$b64" | base64 -d 2>/dev/null)"; done
 
 
-# strings -td -eS -n 13 main.mp3.35 | grep StreamTitle= | head -n 1
-# 16001 StreamTitle='ワルキューレ/...
+########################################################################
+## end of debug notes,
+## start of usage notes
+
+
+##
+## get all dj changes and songs played from znc irc logs
+
+# grep -iE '^[^> ]+ [^> ]+> \.dj |^[^> ]+ <Hanyuu-sama> Now Starting:.04 ' 2021-05-0* | sed -r 's/, .03LP:. [0-9].*//; s/> Now starting:.04 (.*)(\[[0-9]{2}:[0-9]{2}\])/'$'> \033[33m\\1\033[36m\\2/; s/$/\033[0m/'
+
+##
+## listing all songs and their offsets in a recording
+
+# alternative 1, 45 MiB/s:
+#   strings -td -eS -n 13 main.mp3 | grep StreamTitle=
 #
-# dd if=main.mp3.35 bs=4M skip=9701 | tail -c+1831037 | strings -td -eS -n 13 | grep StreamTitle= | head
-# 16001 StreamTitle='Jeff Williams
+# alternative 2, 200 MiB/s:
+#   bgrep -A300 $(echo -n StreamTitle= | xxd -p) ../main.mp3.6 | awk "/^StreamTitle=/{sub(/';\\\\x.*/,"'"");print "0x" o,$0} {o=$2}' | while read o t; do printf '%d %s\n' $o "$t"; done
+#
+# 16001 StreamTitle='Rita - Alicemagic (Tsukasa Remix)';
+# 7216515 StreamTitle='Mizuki Nana - METANOIA';
+
+##
+## discarding everything before a given song
+
+# function slice() { tail -c+$(($3-16000)) <$1 >$2; touch -r $1 $2; }
+# slice main.mp3 slice.mp3 7216515
 
