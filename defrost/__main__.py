@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 # coding: utf-8
 from __future__ import print_function, unicode_literals
 
@@ -29,7 +29,7 @@ except:
 
 """
 defrost.py: split broken icecast recordings into separate mp3s
-2021-05-03, v0.12, ed <irc.rizon.net>, MIT-Licensed
+2021-10-18, v0.13, ed <irc.rizon.net>, MIT-Licensed
 https://ocv.me/dev/?defrost.py
 
 status:
@@ -46,9 +46,8 @@ howto:
   otherwise you have to provide --metaint $yourvalue
 
 new in this version:
-  fix bad frame/time sync check for quiet ranges
-  fix framecache truncating too early
-  add -a (album title)
+  replaced chardet with charset_normalizer
+  default to python3 (py2 still supported)
 
 NOTE:
   the MP3s will be timestamped based on the source file, so
@@ -62,13 +61,21 @@ NOTE:
   and create a cuesheet based on the standalone ones
 """
 
+PY3 = sys.version_info[0] > 2
+WINDOWS = platform.system() == "Windows"
+PYPY = platform.python_implementation() == "PyPy"
+
 try:
     import mutagen
-    import chardet
+    if PY3:
+        import charset_normalizer as chardet
+    else:
+        import chardet
 except ImportError as ex:
+    exe = sys.executable
     print(
-        "{0}\n\n  need {1}; please do this:\n    python -m pip install --user -U {1}".format(
-            repr(ex), str(ex).split(" ")[-1].strip("'")
+        "{0}\n\n  need {1}; please do this:\n    {2} -m pip install --user -U {1}".format(
+            repr(ex), str(ex).split(" ")[-1].strip("'"), exe
         )
     )
     sys.exit(1)
@@ -79,10 +86,6 @@ from mutagen.id3 import ID3, TIT2, TPE1, TALB, COMM, TDRC
 YOLO = False  # cfg: True disengages safety checks
 METAINT = 16000  # cfg: should match the headers from the icecast server
 IO_BUFSZ = 512 * 1024  # cfg: read/write buffer size, probably optimal
-
-PY3 = sys.version_info[0] > 2
-WINDOWS = platform.system() == "Windows"
-PYPY = platform.python_implementation() == "PyPy"
 
 if PY3 and not PYPY:
     uprint = print
@@ -1275,4 +1278,12 @@ if __name__ == "__main__":
 
 # function slice() { tail -c+$(($3-16000)) <$1 >$2; touch -r $1 $2; }
 # slice main.mp3 slice.mp3 7216515
+
+##
+## taking the ~30 last hours of a file
+
+# tail -c $((1024*1024*85*30)) main.mp3.7 >tmp.mp3; touch -r main.mp3.7 /dev/shm/tmp.mp3
+# python3 defrost.py tmp.mp3
+# "Exception: initial tag at 48ba29, expected at 3e80"
+# d=$(printf %d 0x48ba29); tail -c +$((d-15999)) <tmp.mp3 >tmp2.mp3; touch -r main.mp3.7 tmp2.mp3
 
