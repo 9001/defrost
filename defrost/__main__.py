@@ -29,8 +29,8 @@ except:
 
 """
 defrost.py: split broken icecast recordings into separate mp3s
-2021-10-18, v0.13, ed <irc.rizon.net>, MIT-Licensed
-https://ocv.me/dev/?defrost.py
+2021-10-28, v0.14, ed <irc.rizon.net>, MIT-Licensed
+https://github.com/9001/defrost
 
 status:
   works pretty well
@@ -45,9 +45,13 @@ howto:
   especially the "icy-metaint" which should be 16000,
   otherwise you have to provide --metaint $yourvalue
 
+additional supported input formats:
+  - loopstream recording and its tags.txt
+     (doesn't set the correct timestamps)
+
 new in this version:
-  replaced chardet with charset_normalizer
-  default to python3 (py2 still supported)
+  - (mostly complete) support for loopstream recordings as input
+  - moved to github
 
 NOTE:
   the MP3s will be timestamped based on the source file, so
@@ -67,6 +71,7 @@ PYPY = platform.python_implementation() == "PyPy"
 
 try:
     import mutagen
+
     if PY3:
         import charset_normalizer as chardet
     else:
@@ -315,7 +320,10 @@ def ensure_parsers_agree(metasrc1, metasrc2, sz):
 
         if err:
             msg = "scanner/verifier disagreement,\n{} [{}]\n{} [{}]".format(
-                pos1, tag2text(buf1)[0], pos2, tag2text(buf2)[0],
+                pos1,
+                tag2text(buf1)[0],
+                pos2,
+                tag2text(buf2)[0],
             )
             msg += "\nthis is not an error (should just be ignored) "
             msg += "but raising for inspection until properly tested"
@@ -884,6 +892,7 @@ def main():
 
     # fmt: off
     ap = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("-i", default="icy", help="input format; icy=default=icecast, ls=loopstream")
     ap.add_argument("-d", action="store_true", help="enable debug output")
     ap.add_argument("-f", action="store_true", help="overwrite existing split")
     ap.add_argument("-o", metavar="DIR", help="output directory")
@@ -958,11 +967,17 @@ def main():
                 os.mkdir(outdir)
                 break
             except:
+                if os.path.isdir(outdir):
+                    break
+
                 if n == 2:
                     raise
 
                 time.sleep(0.3)
                 pass
+
+    if ar.i == "ls":
+        fn_mp3 = fn
 
     if not os.path.exists(fn_mp3):
         print("\n")
@@ -1067,6 +1082,32 @@ def main():
                 silents[db].append(entry)
             except:
                 silents[db] = [entry]
+
+    if ar.i == "ls":
+        # {"o": 6592000, "o1": 6608493, "o2": 12816880, "t": "Q2xhcmlTIC0gaXJvbnk=", "z": [16000, 32001, 48002,
+        ptn = re.compile(r"^([0-9]{2,8}):([0-9]{2}):([0-9]{2}) (.*)$")
+        with open(
+            fn + ".txt", "r", encoding="utf-8-sig", errors="replace"
+        ) as f_txt, open(fn_frames, "r") as f_frames, open(fn_idx, "w") as f_idx:
+            for txt_ln in f_txt:
+                m = ptn.match(txt_ln)
+                if not m:
+                    error("bad loopstrema metadata line: " + txt_ln)
+                    continue
+
+                g = m.groups()
+                s = [int(x) for x in g[:3]]
+                s = 60 * (60 * s[0] + s[1]) + s[2]
+                t = base64.urlsafe_b64encode(g[3].encode("utf-8")).decode("utf-8")
+
+                # just grab the first frame that fits, assume mp3 not oob
+                for fr in f_frames:
+                    # 7 4388 0.183
+                    _, o, fs = [int(x) for x in fr.split(".")[0].split(" ")]
+                    if fs >= s:
+                        break
+
+                f_idx.write(json.dumps({"o": o, "t": t}) + "\n")
 
     ntrack = 0
     framecache = []  # nframe, ofs, sec
@@ -1220,9 +1261,8 @@ def main():
 
     print()
     tmp_files = [fn_mp3, fn_idx, fn_frames, fn_silence]
-    msg = "finished in {:.2f} sec with {} errors\nyou can delete these now:\n  {}".format(
-        time.time() - t0, rc or "no", "\n  ".join(tmp_files)
-    )
+    msg = "finished in {:.2f} sec with {} errors\nyou can delete these now:\n  {}"
+    msg = msg.format(time.time() - t0, rc or "no", "\n  ".join(tmp_files))
     fun = error if rc else info
     fun(msg)
     sys.exit(rc)
@@ -1286,4 +1326,3 @@ if __name__ == "__main__":
 # python3 defrost.py tmp.mp3
 # "Exception: initial tag at 48ba29, expected at 3e80"
 # d=$(printf %d 0x48ba29); tail -c +$((d-15999)) <tmp.mp3 >tmp2.mp3; touch -r main.mp3.7 tmp2.mp3
-
