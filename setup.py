@@ -61,8 +61,8 @@ def do_rls(for_real):
         sh(py, "-m pip install --user twine wheel")
 
     sh(py, "setup.py cln")
-    sh(py, "setup.py sdist bdist_wheel --python-tag py2")
-    sh(py, "setup.py sdist bdist_wheel --python-tag py3")
+    sh(py, "setup.py sdist bdist_wheel --universal")
+    sh(py, "setup.py sdist bdist_wheel --universal --universal")
 
     files = glob(os.path.join("dist", "*"))
     dest = "pypi" if for_real else "testpypi"
@@ -90,23 +90,17 @@ with open("defrostir/__main__.py", encoding="utf8") as f:
 a = a["about"]
 del a["date"]
 
-maj = sys.version_info[0]
-if sys.argv[-3:-1] == ["bdist_wheel", "--python-tag"]:
-    maj = int(sys.argv[-1][-1])
-
-if maj == 2:
-    py_tag = "2.7"
-    py_req = ">=2.7, <3"
-    chardet = "chardet"
-else:
-    py_tag = "3"
-    py_req = ">=3"
+if sys.argv[-2:] == ["--universal", "--universal"]:
     chardet = "charset_normalizer"
+    a["version"] += ".2"
+else:
+    chardet = "chardet"
+    a["version"] += ".1"
 
 a.update(
     {
         "author_email": "@".join([a["name"], "ocv.me"]),
-        "python_requires": py_req,
+        "python_requires": ">=2.7",
         "install_requires": ["mutagen", chardet],
         "entry_points": {"console_scripts": ["defrostir=defrostir.__main__:main"]},
         "include_package_data": True,
@@ -122,7 +116,8 @@ a.update(
             "Operating System :: MacOS",
             "Topic :: Multimedia :: Sound/Audio",
             "Intended Audience :: End Users/Desktop",
-            "Programming Language :: Python :: " + py_tag,
+            "Programming Language :: Python :: 2",
+            "Programming Language :: Python :: 3",
         ],
         "packages": [a["name"]],
         "cmdclass": {"cln": cln, "rls": rls, "tst": tst},
