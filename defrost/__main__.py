@@ -2,6 +2,16 @@
 # coding: utf-8
 from __future__ import print_function, unicode_literals
 
+about = {
+    "name": "defrostir",
+    "version": "0.14",
+    "date": "2021-10-28",
+    "description": "split broken icecast recordings into separate mp3s",
+    "author": "ed",
+    "license": "MIT",
+    "url": "https://github.com/9001/defrost",
+}
+
 import re
 import os
 import sys
@@ -28,10 +38,6 @@ except:
     from itertools import izip_longest as zip_longest
 
 """
-defrost.py: split broken icecast recordings into separate mp3s
-2021-10-28, v0.14, ed <irc.rizon.net>, MIT-Licensed
-https://github.com/9001/defrost
-
 status:
   works pretty well
 
