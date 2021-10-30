@@ -93,9 +93,11 @@ del a["date"]
 if sys.argv[-2:] == ["--universal", "--universal"]:
     chardet = "charset_normalizer"
     a["version"] += ".2"
-else:
+elif sys.argv[-2:] == ["bdist_wheel", "--universal"]:
     chardet = "chardet"
     a["version"] += ".1"
+else:
+    chardet = "charset_normalizer" if sys.version_info[0] > 2 else "chardet"
 
 a.update(
     {

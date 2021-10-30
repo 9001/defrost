@@ -13,6 +13,10 @@
 * support for other input formats:
   * loopstream recording
 
+# installation
+* get the latest release from pypi: `python3 -m pip install --user -U defrostir`
+* or the latest commit from github: `python3 -m pip install --user -U https://github.com/9001/defrost/tarball/hovudstraum`
+
 
 # usage
 
