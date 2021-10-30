@@ -4,7 +4,7 @@ from __future__ import print_function, unicode_literals
 
 about = {
     "name": "defrostir",
-    "version": "0.14",
+    "version": "0.15",
     "date": "2021-10-28",
     "description": "split broken icecast recordings into separate mp3s",
     "author": "ed",
@@ -55,10 +55,6 @@ additional supported input formats:
   - loopstream recording and its tags.txt
      (doesn't set the correct timestamps)
 
-new in this version:
-  - (mostly complete) support for loopstream recordings as input
-  - moved to github
-
 NOTE:
   the MP3s will be timestamped based on the source file, so
   if the original mp3 lastmodified was when recording ended
@@ -75,20 +71,24 @@ PY3 = sys.version_info[0] > 2
 WINDOWS = platform.system() == "Windows"
 PYPY = platform.python_implementation() == "PyPy"
 
+miss = []
 try:
     import mutagen
+except ImportError:
+    miss.append("mutagen")
 
-    if PY3:
-        import charset_normalizer as chardet
-    else:
+try:
+    import charset_normalizer as chardet
+except ImportError:
+    try:
         import chardet
-except ImportError as ex:
+    except ImportError:
+        miss.append("charset_normalizer" if PY3 else "chardet")
+
+if miss:
     exe = sys.executable
-    print(
-        "{0}\n\n  need {1}; please do this:\n    {2} -m pip install --user -U {1}".format(
-            repr(ex), str(ex).split(" ")[-1].strip("'"), exe
-        )
-    )
+    m = "\n  please do this:\n    {0} -m pip install --user -U {1}"
+    print(m.format(exe, " ".join(miss)))
     sys.exit(1)
 
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, COMM, TDRC
@@ -898,7 +898,7 @@ def main():
 
     # fmt: off
     ap = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("-i", default="icy", help="input format; icy=default=icecast, ls=loopstream")
+    ap.add_argument("-i", metavar="FORMAT", default="icy", help="input format; icy=default=icecast, ls=loopstream")
     ap.add_argument("-d", action="store_true", help="enable debug output")
     ap.add_argument("-f", action="store_true", help="overwrite existing split")
     ap.add_argument("-o", metavar="DIR", help="output directory")

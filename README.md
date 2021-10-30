@@ -1,7 +1,6 @@
 # defrost
 * split broken icecast recordings into separate mp3s
-* supports windows, macos, linux, freebsd
-* MIT-Licensed, 2019-06-01, ed @ irc.rizon.net
+* MIT-Licensed, 2019-06-01, ed @ irc.rizon.net, [github](https://github.com/9001/defrost), [pypi](https://pypi.org/project/defrostir/)
 
 # features
 * **silence detection** -- finds the best part to split at
@@ -13,3 +12,21 @@
 * **timestamping** -- the date/time that the song was played live
 * support for other input formats:
   * loopstream recording
+
+
+# usage
+
+from an internet radio station:
+```
+wget -U MPlayer --header "Icy-MetaData: 1" -S "https://stream.r-a-d.io/main.mp3"
+# wait until the show is over, then abort the download
+python3 -m defrostir main.mp3
+```
+
+from a loopstream recording:
+```
+python3 -m defrostir -i ls Loopstream-2021-10-02_22.53.44.mp3
+```
+
+# notes
+versions `x.y.1` have [chardet](https://pypi.org/project/chardet/) as a dependency, while `x.y.2` have [charset-normalizer](https://pypi.org/project/charset-normalizer/) (preferred) and are otherwise identical; `setup.py rls` will produce both to avoid a pypi package selection bug
