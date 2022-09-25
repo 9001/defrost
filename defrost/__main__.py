@@ -326,10 +326,7 @@ def ensure_parsers_agree(metasrc1, metasrc2, sz):
 
         if err:
             msg = "scanner/verifier disagreement,\n{} [{}]\n{} [{}]".format(
-                pos1,
-                tag2text(buf1)[0],
-                pos2,
-                tag2text(buf2)[0],
+                pos1, tag2text(buf1)[0], pos2, tag2text(buf2)[0],
             )
             msg += "\nthis is not an error (should just be ignored) "
             msg += "but raising for inspection until properly tested"
@@ -528,14 +525,6 @@ def run_defrost(fn, fn_mp3, fn_idx, sz):
 
 
 def collect_frames(fn_mp3):
-    # cmd /c "set FFREPORT=level=32:file=ffprobe.log & ffprobe -hide_banner -select_streams a:0 -show_frames -show_entries frame=pkt_pts_time,pkt_dts_time,best_effort_timestamp_time,pkt_duration_time,pkt_pos,nb_samples -of compact=p=0 5g-ok.mp3.defrost.mp3 >ffprobe.out"
-    # tail -F ffprobe.out | awk 'NR%1000==1'
-    # perl -e 'while(<>){if (!/^pkt_pts_time=([0-9\.]+)\|pkt_dts_time=([0-9\.]+)\|best_effort_timestamp_time=([0-9\.]+)\|pkt_duration_time=([0-9\.]+)\|pkt_pos=([0-9]+)\|nb_samples=([0-9]+)\r?$/) {print$_;next} printf "%.3f %.3f %.3f %.3f %d %d\n",$1,$2,$3,$4,$5,$6}' <ffprobe.out >ffprobe.outf
-
-    ptn = r"^pkt_pts_time=([0-9\.]+)\|pkt_dts_time=([0-9\.]+)\|best_effort_timestamp_time=([0-9\.]+)\|pkt_pos=([0-9]+)\r?$"
-    # ptn = r"^pts_time=([0-9\.]+)\|dts_time=([0-9\.]+)\|pos=([0-9]+)\r?$"
-    ptn = re.compile(ptn)
-
     # fmt: off
     c = [
         "ffprobe",
@@ -543,7 +532,7 @@ def collect_frames(fn_mp3):
         "-select_streams", "a:0",
         "-show_frames",
         # "-show_packets",
-        "-show_entries", "frame=pkt_pts_time,pkt_dts_time,best_effort_timestamp_time,pkt_pos",
+        "-show_entries", "frame=pkt_pts_time,pkt_dts_time,best_effort_timestamp_time,pkt_pos,channels",
         # "-show_entries", "packet=pts_time,dts_time,pos",
         "-of", "compact=p=0",
         fn_mp3,
@@ -579,19 +568,26 @@ def collect_frames(fn_mp3):
 
         sbuf = tbuf.decode("utf-8")
         for ln in sbuf.split("\n"):
-            m = ptn.match(ln)
-            if not m:
+            try:
+                fields = [x.split("=") for x in ln.split("|")]
+                fields = {k: v for k, v in fields}
+                _ = fields["best_effort_timestamp_time"]
+            except:
                 continue
 
-            pts, dts, ts, pos = m.groups()
-            if pts != dts or pts != ts:
+            pts = fields.get("pkt_pts_time")
+            dts = fields.get("pkt_dts_time")
+            ts = fields.get("best_effort_timestamp_time")
+            if (
+                (pts and dts and pts != dts)
+                or (pts and ts and pts != ts)
+                or (dts and ts and dts != ts)
+            ):
                 warn("defrost: spooky timestamps ({},{},{})\n".format(pts, dts, ts))
 
-            # ts, dts, pos = m.groups()
-            # if ts != dts:
-            #     warn("defrost: spooky timestamps ({},{})\n".format(ts, dts))
+            ts = ts or dts or pts
 
-            yield [int(pos), float(ts)]
+            yield [int(fields["pkt_pos"]), float(ts)]
 
 
 def detect_silence_one(fn_mp3, db, len_sec, xpos, ret):
@@ -1300,6 +1296,12 @@ if __name__ == "__main__":
 ########################################################################
 ## end of debug notes,
 ## start of usage notes
+
+
+##
+## convert a folder of loopstream recordings starting at file "Loopstream-2021-10-31_21.57.26.mp3"
+
+# en=; for f in *.mp3; do [ "$f" = "Loopstream-2021-10-31_21.57.26.mp3" ] && en=1; [ $en ] || continue; t=${f:11:4}-${f:16:2}${f:19:2}-${f:22:2}${f:25:2}${f:28:2}; echo $t; PYTHONPATH=/c/Users/ed/dev/defrost/ python -m defrost -i ls -o $t "$f"; done; rm -- *.mp3.defrost-*
 
 
 ##
