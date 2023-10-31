@@ -25,6 +25,7 @@ import struct
 import hashlib
 import logging
 import argparse
+import calendar
 import platform
 import threading
 import traceback
@@ -1276,6 +1277,12 @@ def main():
 
             if not ar.no_split:
                 unix = int(lastmod - (end_ts - ts1))
+                if ar.i == "ls":
+                    ptn = r"([0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}\.[0-9]{2}\.[0-9]{2})"
+                    m = re.search(ptn, os.path.basename(ar.ICY_MP3))
+                    if m:
+                        dt = time.strptime(m.group(1), "%Y-%m-%d_%H.%M.%S")
+                        unix = int(calendar.timegm(dt)) + ts1
                 fmt = "%Y-%m-%d, %H:%M:%S"
                 timestr = datetime.fromtimestamp(unix, UTC).strftime(fmt)
                 fn = split_mp3(f_defrosted, ntrack, ofs1, ofs2, outdir, tagtxt)
