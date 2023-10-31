@@ -56,9 +56,9 @@ def do_rls(for_real):
     py = sys.executable
     sp.run("rem", shell=True)
     try:
-        import twine, wheel
+        import twine, wheel, setuptools
     except:
-        sh(py, "-m pip install --user twine wheel")
+        sh(py, "-m pip install --user twine wheel setuptools")
 
     sh(py, "setup.py cln")
     sh(py, "setup.py sdist bdist_wheel --universal")
@@ -111,7 +111,7 @@ a.update(
         "keywords": "icecast internet radio stream ripping silence splitting",
         "classifiers": [
             "License :: OSI Approved :: MIT License",
-            "Development Status :: 3 - Alpha",
+            "Development Status :: 5 - Production/Stable",
             "Environment :: Console",
             "Operating System :: Microsoft :: Windows",
             "Operating System :: POSIX :: Linux",

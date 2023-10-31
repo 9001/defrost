@@ -4,8 +4,8 @@ from __future__ import print_function, unicode_literals
 
 about = {
     "name": "defrostir",
-    "version": "0.15",
-    "date": "2021-10-28",
+    "version": "1.0",
+    "date": "2023-10-31",
     "description": "split broken icecast recordings into separate mp3s",
     "author": "ed",
     "license": "MIT",
@@ -577,8 +577,10 @@ def collect_frames(fn_mp3):
     while True:
         ibuf = p.stdout.read(4096)
         if not ibuf:
-            if p.poll() is not None:
-                info("FFmpeg terminated")
+            rc = p.poll()
+            if rc is not None:
+                fun = warn if rc else info
+                fun("FFmpeg exited with status %d", rc)
                 return
             else:
                 fails += 1
@@ -925,7 +927,7 @@ def main():
     ap.add_argument("-f", action="store_true", help="overwrite existing split")
     ap.add_argument("-o", metavar="DIR", help="output directory")
     ap.add_argument("-a", metavar="ALBUM", help="album title for id3 tags")
-    ap.add_argument("--metaint", type=int, help="icecast metadata interval", default=METAINT)
+    ap.add_argument("--metaint", metavar="N", type=int, help="icecast metadata interval in bytes; default %s" % (METAINT,), default=METAINT)
     ap.add_argument("--no-split", action="store_true", help="do not split the mp3")
     ap.add_argument("--no-id3", action="store_true", help="do not write id3 tags")
     ap.add_argument("--yolo", action="store_true", help="less sanity checks (for buggy files)")
