@@ -30,7 +30,6 @@ import threading
 import traceback
 import unicodedata
 import subprocess as sp
-from datetime import datetime
 
 try:
     from itertools import zip_longest
@@ -98,6 +97,35 @@ YOLO = False  # cfg: True disengages safety checks
 METAINT = 16000  # cfg: should match the headers from the icecast server
 IO_BUFSZ = 512 * 1024  # cfg: read/write buffer size, probably optimal
 
+
+try:
+    from datetime import datetime, timezone
+
+    UTC = timezone.utc
+except ImportError:
+    from datetime import datetime, timedelta, tzinfo
+
+    TD_ZERO = timedelta(0)
+
+    class _UTC(tzinfo):
+        def utcoffset(self, dt):
+            return TD_ZERO
+
+        def tzname(self, dt):
+            return "UTC"
+
+        def dst(self, dt):
+            return TD_ZERO
+
+    UTC = _UTC()
+
+
+if not PY3:
+    import io
+
+    open = io.open
+
+
 if PY3 and not PYPY:
     uprint = print
 else:
@@ -128,14 +156,14 @@ class LoggerFmt(logging.Formatter):
         else:
             c = "1;31"
 
-        ts = datetime.utcfromtimestamp(record.created)
+        ts = datetime.fromtimestamp(record.created, UTC)
         ts = ts.strftime("%H:%M:%S.%f")[:-3]
 
         msg = record.msg
         if record.args:
             msg = msg % record.args
 
-        return "\033[0;36m{}\033[0{}m {}\033[0m".format(ts, c, msg)
+        return "\033[0;36m%s\033[0%sm %s\033[0m" % (ts, c, msg)
 
 
 def configure_logger(debug):
@@ -154,7 +182,7 @@ def configure_logger(debug):
 
 def reprint(*args, **kwargs):
     msg = args[0]
-    msg = "\033[A{}\033[K".format(msg)
+    msg = "\033[A%s\033[K" % (msg,)
     uprint(msg, *list(args)[1:], **kwargs)
 
 
@@ -309,7 +337,7 @@ def fmt_meta(metasrc_yield, sz, ntags):
     pos, buf = metasrc_yield
     meta, enc, err = tag2text(buf)
 
-    return "at {}/{} ({:.2f}%), {} tags, [{}] [{}] {}".format(
+    return "at %s/%s (%.2f%%), %s tags, [%s] [%s] %s" % (
         pos, sz, (pos * 100.0 / sz), ntags, enc, meta, err
     )
 
@@ -453,7 +481,7 @@ def defrost(fn, metasrc, sz):
 
 def run_defrost(fn, fn_mp3, fn_idx, sz):
     with open(fn, "rb", IO_BUFSZ) as fi, open(fn_mp3, "wb", IO_BUFSZ) as fom, open(
-        fn_idx, "w", IO_BUFSZ
+        fn_idx, "w", IO_BUFSZ, encoding="utf-8"
     ) as foi, IcyScanner(fn) as metasrc:
         ntags = 0
         fom_pos = 0
@@ -704,10 +732,7 @@ def detect_silence_one(fn_mp3, db, len_sec, xpos, ret):
 def build_framecache(f_frames, ofs1, ofs2):
     lower_byte = max(0, ofs1 - 320 * 128 * 60)
     extra_sec = 3600
-    msg = "rebuild framecache {}..+{} for {}..{}".format(
-        lower_byte, extra_sec, ofs1, ofs2
-    )
-    debug(msg)
+    debug("rebuild framecache %s..+%s for %s..%s", lower_byte, extra_sec, ofs1, ofs2)
     nframe = 0
     framecache = []
 
@@ -879,7 +904,7 @@ def tag_mp3(fn, tagtxt, timestr, album):
         id3.add(COMM(encoding=3, text=comment))
         id3.save(fn)
     except Exception as ex:
-        warn("failed to write tags: {}".format(repr(ex)))
+        warn("failed to write tags: %r", ex)
 
 
 def add_sentinel(gen):
@@ -1000,11 +1025,11 @@ def main():
         run_defrost(fn, fn_mp3, fn_idx, sz)
 
     if os.path.exists(fn_frames):
-        with open(fn_frames, "r") as f:
+        with open(fn_frames, "r", encoding="utf-8") as f:
             ln = next(f)
             fields = ln.split(" ")
             if len(fields) != 3 or fields[0] != "0":
-                warn("deleting old {} (format has changed)".format(fn_frames))
+                warn("deleting old %s (format has changed)", fn_frames)
                 os.unlink(fn_frames)
 
     sz = os.path.getsize(fn_mp3)
@@ -1014,12 +1039,12 @@ def main():
         buf = []
         pos = 0
         nframes = -1
-        with open(fn_frames, "w") as f:
+        with open(fn_frames, "w", encoding="utf-8") as f:
             for pos, ts in collect_frames(fn_mp3):
                 nframes += 1
-                buf.append("{} {} {:.3f}\n".format(nframes, pos, ts))
+                buf.append("%s %s %.3f\n" % (nframes, pos, ts))
                 if len(buf) > 1024 * 16:
-                    print("\033[A{:.2f}% ".format(pos * 100.0 / sz))
+                    print("\033[A%.2f%% " % (pos * 100.0 / sz,))
                     f.write("".join(buf))
                     buf = []
             if buf:
@@ -1032,7 +1057,7 @@ def main():
 
     print("\n")
     info("reading eof from frametab")
-    with open(fn_frames, "r", IO_BUFSZ) as f:
+    with open(fn_frames, "r", IO_BUFSZ, encoding="utf-8") as f:
         f.seek(0, os.SEEK_END)
         f.seek(f.tell() - 1024)
         next(f)
@@ -1065,16 +1090,16 @@ def main():
             r.extend(task[1])
 
         r.sort()
-        with open(fn_silence, "w") as f:
+        with open(fn_silence, "w", encoding="utf-8") as f:
             for nframe, db, start, end in r:
-                ln = "{} {} {:.2f} {:.2f}\n".format(nframe, db, start, end)
+                ln = "%s %s %.2f %.2f\n" % (nframe, db, start, end)
                 f.write(ln)
 
     # probably small enough
     print()
     info("reading silent ranges into memory")
     silents = {}  # dB => [nframe, t1, t2]  (prefer timestamps)
-    with open(fn_silence, "r") as f:
+    with open(fn_silence, "r", encoding="utf-8") as f:
         for ln in f:
             fields = ln.split(" ")
             nframe, db = [int(x) for x in fields[:2]]
@@ -1088,9 +1113,13 @@ def main():
     if ar.i == "ls":
         # {"o": 6592000, "o1": 6608493, "o2": 12816880, "t": "Q2xhcmlTIC0gaXJvbnk=", "z": [16000, 32001, 48002,
         ptn = re.compile(r"^([0-9]{2,8}):([0-9]{2}):([0-9]{2}) (.*)$")
-        with open(
-            fn + ".txt", "r", encoding="utf-8-sig", errors="replace"
-        ) as f_txt, open(fn_frames, "r") as f_frames, open(fn_idx, "w") as f_idx:
+        with open(fn + ".txt", "r", encoding="utf-8", errors="replace") as f_txt, open(fn_frames, "r", encoding="utf-8") as f_frames, open(fn_idx, "w", encoding="utf-8") as f_idx:
+            for _ in range(4096):
+                ofs = f_txt.tell()
+                if f_txt.read(1) in "1234567890":
+                    break
+            f_txt.seek(ofs)
+
             for txt_ln in f_txt:
                 m = ptn.match(txt_ln)
                 if not m:
@@ -1113,7 +1142,7 @@ def main():
 
     ntrack = 0
     framecache = []  # nframe, ofs, sec
-    with open(fn_idx, "r") as f_idx, open(fn_frames, "r") as f_frames, open(
+    with open(fn_idx, "r", encoding="utf-8") as f_idx, open(fn_frames, "r", encoding="utf-8") as f_frames, open(
         fn_mp3, "rb"
     ) as f_defrosted:
         tag = None
@@ -1136,7 +1165,7 @@ def main():
             ofs1 = tag["o"]
             ofs2 = tag2["o"]
             perc = ofs1 * 100.0 / sz
-            debug("{:.0f}% track #{}, ofs {}..{}".format(perc, ntrack, ofs1, ofs2))
+            debug("%.0f%% track #%s, ofs %s..%s", perc, ntrack, ofs1, ofs2)
 
             # 38 frames in 1 sec (1152 samples per frame),
             # 192k=627b, 256k=836bm 320k=1045b
@@ -1180,10 +1209,8 @@ def main():
                 msg = "could not find next_sec {} in framecache, min is {} (#{}, {}b), gave up at {} (#{}, {}b)"
                 raise Exception(msg.format(next_sec, c, a, b, ts, nframe, ofs))
 
-            msg = "{:.0f}% track #{}, ofs {}..{}, sec {}..{}, frame {}..{}"
-            debug(
-                msg.format(perc, ntrack, ofs1, ofs2, tag_ts1, tag_ts2, frame1, frame2)
-            )
+            msg = "%.0f%% track #%s, ofs %s..%s, sec %s..%s, frame %s..%s"
+            debug(msg, perc, ntrack, ofs1, ofs2, tag_ts1, tag_ts2, frame1, frame2)
 
             ts1 = tag_ts1
             ts2 = tag_ts2
@@ -1245,12 +1272,12 @@ def main():
 
             tagbin = tag["t"]
             tagtxt, enc, _ = tag2text(tagbin)
-            debug("{:.0f}% tag: [{}] [{}]".format(perc, enc, tagtxt))
+            debug("%.0f%% tag: [%s] [%s]", perc, enc, tagtxt)
 
             if not ar.no_split:
                 unix = int(lastmod - (end_ts - ts1))
                 fmt = "%Y-%m-%d, %H:%M:%S"
-                timestr = datetime.utcfromtimestamp(unix).strftime(fmt)
+                timestr = datetime.fromtimestamp(unix, UTC).strftime(fmt)
                 fn = split_mp3(f_defrosted, ntrack, ofs1, ofs2, outdir, tagtxt)
                 if not ar.no_id3:
                     tag_mp3(fn, tagtxt, timestr, ar.a)
