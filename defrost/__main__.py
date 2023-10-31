@@ -1224,6 +1224,12 @@ def main():
                 quiet_ts_ref = tag_ts2
                 quiet_frame2 = frame2
 
+            if quiet_ts2 is None and ofs1 > sz - 4096:
+                t = "tag at time %s, byte %s, is past mp3 eof %s: %s"
+                warn(t, tag_ts1, ofs1, sz, tag2text(tag["t"]))
+                rc += 1
+                continue  # or maybe break
+
             for nframe, ofs, ts in framecache:
                 if ts > quiet_ts2:
                     break
