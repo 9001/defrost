@@ -4,8 +4,8 @@ from __future__ import print_function, unicode_literals
 
 about = {
     "name": "defrostir",
-    "version": "1.0",
-    "date": "2023-10-31",
+    "version": "1.1",
+    "date": "2024-07-08",
     "description": "split broken icecast recordings into separate mp3s",
     "author": "ed",
     "license": "MIT",
