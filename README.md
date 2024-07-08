@@ -22,7 +22,7 @@
 
 from an internet radio station:
 ```
-wget -U MPlayer --header "Icy-MetaData: 1" -S "https://stream.r-a-d.io/main.mp3"
+wget -U MPlayer --header 'Icy-MetaData: 1' -St1 'https://stream.r-a-d.io/main.mp3'
 # wait until the show is over, then abort the download
 python3 -m defrostir main.mp3
 ```

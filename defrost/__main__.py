@@ -45,7 +45,7 @@ howto:
   this requiers an icecast recording which includes the
   icecast metadata; to create such a recording do this:
 
-    wget -U 'MPlayer' --header "Icy-MetaData: 1" -S "https://stream.r-a-d.io/main.mp3"
+    wget -U MPlayer --header 'Icy-MetaData: 1' -St1 'https://stream.r-a-d.io/main.mp3'
 
   take note of the headers that the server sends back,
   especially the "icy-metaint" which should be 16000,
@@ -927,6 +927,7 @@ def main():
     ap.add_argument("-f", action="store_true", help="overwrite existing split")
     ap.add_argument("-o", metavar="DIR", help="output directory")
     ap.add_argument("-a", metavar="ALBUM", help="album title for id3 tags")
+    ap.add_argument("-n", metavar="TRACKNO", type=int, default=1, help="initial tracknumber to start counting from in tags")
     ap.add_argument("--metaint", metavar="N", type=int, help="icecast metadata interval in bytes; default %s" % (METAINT,), default=METAINT)
     ap.add_argument("--no-split", action="store_true", help="do not split the mp3")
     ap.add_argument("--no-id3", action="store_true", help="do not write id3 tags")
@@ -1143,7 +1144,7 @@ def main():
 
                 f_idx.write(json.dumps({"o": o, "t": t}) + "\n")
 
-    ntrack = 0
+    ntrack = ar.n - 1
     framecache = []  # nframe, ofs, sec
     with open(fn_idx, "r", encoding="utf-8") as f_idx, open(fn_frames, "r", encoding="utf-8") as f_frames, open(
         fn_mp3, "rb"
