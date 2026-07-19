@@ -16,6 +16,7 @@ import re
 import os
 import sys
 import time
+import math
 import json
 import base64
 import pprint
@@ -785,7 +786,34 @@ def build_framecache(f_frames, ofs1, ofs2):
         msg = "could not build framecache ofs {}..{}, last seen ofs {}, sec {}"
         raise Exception(msg.format(ofs1, ofs2, ofs, sec))
 
-    return framecache
+    # build list of framesize-changes (likely new encoder/samplerate)
+    avvik = []
+    ov2 = ov3 = od2 = od3 = 0
+    for v1, v2, v3 in framecache:
+        d2 = v2 - ov2
+        d3 = v3 - ov3
+        if not math.isclose(d2, od2, rel_tol=0.07) or not math.isclose(d3, od3, rel_tol=0.07):
+            avvik.append([v1, v2, v3, ov2, ov3, d2, d3, od2, od3])
+            # 1-(44100/48000) = 0.081
+        ov2 = v2
+        ov3 = v3
+        od2 = d2
+        od3 = d3
+    # then debounce; keep whatever stayed stable for 2sec+
+    avvik2 = []
+    o = 0
+    for x in avvik:
+        v = x[2]
+        if o and v - o > 2:
+            avvik2.append(x)
+        o = v
+    if avvik2:
+        t = "detected changes in mp3 framesize (change of samplerate or encoder);\n%s\n" % (framecache[0],)
+        for tt in avvik2:
+            t += " %d, %d, %.3f  %d  %.3f  %d  %.3f  %d  %.3f\n" % tuple(tt)
+        warn(t + str(framecache[-1]))
+
+    return framecache, avvik2
 
 
 def find_silence(silents, target_sec, min_lower):
@@ -1146,6 +1174,7 @@ def main():
 
     ntrack = ar.n - 1
     framecache = []  # nframe, ofs, sec
+    alle_avvik = []  # nframe, ofs, sec, *crap
     with open(fn_idx, "r", encoding="utf-8") as f_idx, open(fn_frames, "r", encoding="utf-8") as f_frames, open(
         fn_mp3, "rb"
     ) as f_defrosted:
@@ -1182,7 +1211,7 @@ def main():
                 if framecache:
                     msg = "framecache insufficient, {:,} > {:,} or {:,} < {:,}"
                     debug(msg.format(framecache[0][1], lower, framecache[-1][1], upper))
-                framecache = build_framecache(f_frames, ofs1, ofs2)
+                framecache, alle_avvik = build_framecache(f_frames, ofs1, ofs2)
                 msg = "framecache covers frame {}..{}, ofs {:,}..{:,}, ts {}..{}"
                 fc0 = framecache[0]
                 fc1 = framecache[-1]
@@ -1284,7 +1313,26 @@ def main():
             tagtxt, enc, _ = tag2text(tagbin)
             debug("%.0f%% tag: [%s] [%s]", perc, enc, tagtxt)
 
-            if not ar.no_split:
+            segs = []
+            cofs = ofs1
+            for x in alle_avvik:
+                ofs = x[1]
+                if ofs < cofs or ofs >= ofs2:
+                    continue
+                segs.append([cofs, ofs])
+                cofs = ofs
+            if not segs:
+                segs = [[ofs1, ofs2]]  # good
+            else:
+                if cofs < ofs2:
+                    segs.append([cofs, ofs2])
+                t = "extra splits due to mp3-framesize-change; %s => %s"
+                warn(t % ((ofs1, ofs2), segs))
+
+            if ar.no_split:
+                segs = []
+
+            for (ofs1, ofs2) in segs:
                 unix = int(lastmod - (end_ts - ts1))
                 if ar.i == "ls":
                     ptn = r"([0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}\.[0-9]{2}\.[0-9]{2})"
@@ -1300,6 +1348,8 @@ def main():
 
                 os.utime(fn, (int(time.time()), unix))
                 info("{:.0f}% wrote [{}] [{}]".format(perc, timestr, fn))
+                if len(segs) > 1:
+                    ntrack += 1
 
             next_sec = ts2
             tag = tag2
